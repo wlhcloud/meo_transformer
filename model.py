@@ -908,7 +908,10 @@ class MyModelForCausalLLM(PreTrainedModel, GenerationMixin):
             self.config.hidden_size, self.config.vocab_size, bias=False
         )
         # 优化，参数共享，减少被训练的的参数量
-        self.model.embed_tokens.weight = self.lm_head.weight
+        # self.model.embed_tokens.weight = self.lm_head.weight
+        self.model.embed_tokens.weight = nn.Linear(
+            self.config.hidden_size, self.config.vocab_size, bias=False
+        )
         self.OUT = CausalLMOutputWithPast()
 
     def forward(

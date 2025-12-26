@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from contextlib import nullcontext
 from transformers import AutoTokenizer
 from model import MyModelForCausalLLM, MyModelConfig
-from dataset import PretrainDataset
+from dataset import PretrainDataset, SFTDataset
 
 warnings.filterwarnings("ignore")
 
@@ -39,7 +39,12 @@ def init_model(lm_config):
     # 读取现成的分词器模型
     tokenizer = AutoTokenizer.from_pretrained("./model/")
     # 使用自己封装的类初始化一个自己的大语言模型
-    model = MyModelForCausalLLM(config=lm_config).to(args.device)
+    model = MyModelForCausalLLM(config=lm_config)  # 此时是随机初始化的参数
+    moe_path = "_moe" if lm_config.use_moe else ""
+    ckp = f"{args.save_dir}/pretrain_{lm_config.hidden_size}{moe_path}.pth"
+    state_dict = torch.load(ckp, map_location=args.device)
+    model.load_state_dict(state_dict=state_dict, strict=False)
+    model = model.to(args.device)
     Logger(
         f"LLM 可以被训练的参数量是：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万"
     )
@@ -164,7 +169,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_hidden_layers", type=int, default=8)
     parser.add_argument("--max_seq_len", default=512, type=int)
     parser.add_argument("--use_moe", default=False, type=bool)
-    parser.add_argument("--data_path", default="./data/pretrain_hq.jsonl", type=str)
+    parser.add_argument("--data_path", default="./data/sft_mini_512.jsonl", type=str)
 
     args = parser.parse_args()
 
@@ -202,7 +207,8 @@ if __name__ == "__main__":
 
     # 初始化模型和分词器
     model, tokenizer = init_model(lm_config)
-    train_ds = PretrainDataset(
+
+    train_ds = SFTDataset(
         args.data_path, tokenizer=tokenizer, max_length=args.max_seq_len
     )
     train_sampler = DistributedSampler(train_ds) if ddp else None
