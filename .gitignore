@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+.env
+config/local.yaml
+logs/
+*.log
+.idea/
+.vscode/
+*.swp
+*.zip
+*.tar.gz
+data/

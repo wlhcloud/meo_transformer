@@ -1,0 +1,1 @@
+pip install langchain langchain-openai langchain-core langchain-community gradio
