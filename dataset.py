@@ -132,3 +132,94 @@ class PretrainDataset(Dataset):
         Y = torch.tensor(input_ids[1:], dtype=torch.long)
         loss_mask = torch.tensor(loss_mask[1:], dtype=torch.long)
         return X, Y, loss_mask
+
+
+class DPODataset(Dataset):
+    def __init__(self, file_path, tokenizer, max_length=4096):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.padding = (
+            tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        )
+        self.bos_id = tokenizer(
+            "<|im_start|>assistant", add_special_tokens=False
+        ).input_ids
+        self.eos_id = tokenizer("<|im_end|>", add_special_tokens=False).input_ids
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            self.data = [json.loads(line.strip()) for line in f]
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]  # 一行数据，其中包含chosen和rejected字段
+        chosen = item["chosen"]
+        rejected = item["rejected"]
+        chosen_prompt = self.tokenizer.apply_chat_template(
+            chosen, tokenize=False, add_generation_prompt=False
+        )
+        rejected_prompt = self.tokenizer.apply_chat_template(
+            rejected, tokenize=False, add_generation_prompt=False
+        )
+        # 下面才是会把文本变成token ids的过程
+        chosen_encoding = self.tokenizer(
+            chosen_prompt,
+            max_length=self.max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        rejected_encoding = self.tokenizer(
+            rejected_prompt,
+            max_length=self.max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        chosen_input_ids = chosen_encoding["input_ids"]
+        chosen_loss_mask = self._generate_loss_mask(chosen_input_ids)
+        rejected_input_ids = rejected_encoding["input_ids"]
+        rejected_loss_mask = self._generate_loss_mask(rejected_input_ids)
+
+        x_chosen = torch.tensor(chosen_input_ids[:-1], dtype=torch.bfloat16)
+        y_chosen = torch.tensor(chosen_input_ids[1:], dtype=torch.bfloat16)
+        mask_chosen = torch.tensor(chosen_loss_mask, dtype=torch.bfloat16)
+
+        x_rejected = torch.tensor(rejected_input_ids[:-1], dtype=torch.bfloat16)
+        y_rejected = torch.tensor(rejected_input_ids[1:], dtype=torch.bfloat16)
+        mask_rejected = torch.tensor(rejected_loss_mask, dtype=torch.bfloat16)
+
+        return {
+            "x_chosen": x_chosen,
+            "y_chosen": y_chosen,
+            "mask_chosen": mask_chosen,
+            "x_rejected": x_rejected,
+            "y_rejected": y_rejected,
+            "mask_rejected": mask_rejected,
+        }
+
+    def _generate_loss_mask(self, input_ids):
+        # input_ids = question+answer(chosen) question+answer(rejected)
+        loss_mask = [0] * len(input_ids)  # 初始化
+        i = 0
+        while i < len(input_ids):
+            # 本质上就是字符串匹配，匹配句子中的 <|im_start|>assistant
+            if input_ids[i : i + len(self.bos_id)] == self.bos_id:
+                start = i + len(self.bos_id)
+                end = start
+                while end < len(input_ids):
+                    # 本质上就是字符串匹配，匹配句子中的 <|im_end|>
+                    if input_ids[end : end + len(self.eos_id)] == self.eos_id:
+                        break
+                for j in range(
+                    start + 1, min(end + len(self.eos_id) + 1, self.max_length)
+                ):
+                    loss_mask[j] = (
+                        1  # 就是将 question+answer(rejected) answer 对应的mask设置为1
+                    )
+                i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids)
+            else:
+                i += 1
+        return loss_mask

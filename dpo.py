@@ -6,6 +6,7 @@ import math
 import warnings
 
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch import optim, nn
 from torch.nn.parallel import DistributedDataParallel
@@ -35,6 +36,42 @@ def get_lr(current_step, total_step, lr):
     return lr / 10 + 0.5 * lr * (1 + math.cos(math.pi * current_step / total_step))
 
 
+def logits_to_probs(logits, labels):
+    # 从大模型给出的对数几率，变成概率分布
+    # logits shape: (batch_size,seq_len,vocab_size)
+    # labels shape:(batch_size,seq_len)
+    # probs shape: (batch_size,seq_len)
+    log_probs = F.log_softmax()  # 先进行softmax,然后再取对数log
+    # gather取值
+    probs = torch.gather(log_probs, dim=2, index=labels.unsqueeze(2)).squeeze(-1)
+    return probs
+
+
+def dpo_loss(ref_probs, probs, mask, beta):
+    # ref_probs: refrenshce model 进行推理预测之后的结果
+    # probs: 要通过dpo去进行训练的模型推理预测之后的结果
+    # mask: 指的是 Question+Answer 需要计算loss被考虑的时刻，说白了就只和Anwser有关
+    # beta: 就是dpo 损失函数公式中的超参数
+    # ref_probs 和 probs 都是同样的形状
+    seq_lengths = mask.sum(dim=1, keepdim=True)  # (batch_size,1)
+    ref_probs = (ref_probs * mask).sum(dim=1) / seq_lengths.squeeze()
+    probs = (probs * mask).sum(dim=1) / seq_lengths.squeeze()
+
+    # 将chosen数据和rejected数据分开
+    batch_size = ref_probs.shape[0]
+    chosen_ref_probs = ref_probs[: batch_size // 2]
+    rejected_ref_probs = ref_probs[batch_size // 2 :]
+    chosen_probs = probs[: batch_size // 2]
+    rejected_probs = probs[batch_size // 2 :]
+
+    # DPO论文中的损失函数公式计算
+    pi_logratios = chosen_probs - rejected_probs
+    ref_logratios = chosen_ref_probs - rejected_ref_probs
+    logits = pi_logratios - ref_logratios
+    loss = -F.logsigmoid(beta * logits)
+    return loss.mean()
+
+
 def init_model(lm_config):
     # 读取现成的分词器模型
     tokenizer = AutoTokenizer.from_pretrained("./model/")
@@ -48,13 +85,6 @@ def init_model(lm_config):
     Logger(
         f"LLM 可以被训练的参数量是：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万"
     )
-
-    # 初始化參考模型
-    ref_model = MyModelForCausalLLM(lm_config)
-    ref_model.load_state_dict(state_dict, strict=True)
-    ref_model.eval()
-    ref_model.requires_grad_(False)  # 不训练参考模型
-    ref_model = ref_model.to(args.device)
     return model, tokenizer
 
 
@@ -75,12 +105,22 @@ def init_distributed_model():
 
 
 def train_epoch(epoch):
-    # reduction=none 意味着返回每条样本的损失，reduction='sum'，reduction = 'mean'
-    loss_fct = nn.CrossEntropyLoss(reduction="none")
+
     start_time = time.time()
-    for step, (X, Y, loss_mask) in enumerate(train_loader):
-        X = X.to(args.device)
-        Y = Y.to(args.device)
+    for step, batch in enumerate(train_loader):
+        x_chosen = batch["x_chosen"].to(args.device)
+        y_chosen = batch["y_chosen"].to(args.device)
+        mask_chosen = batch["mask_chosen"].to(args.device)
+        x_rejected = batch["x_rejected"].to(args.device)
+        y_rejected = batch["y_rejected"].to(args.device)
+        mask_rejected = batch["mask_rejected"].to(args.device)
+
+        x = torch.cat(
+            [x_chosen, x_rejected], dim=0
+        )  # 相当于样本的堆叠，只想要一个x数据集
+        y = torch.cat([y_chosen, y_rejected], dim=0)
+        mask = torch.cat([mask_chosen, mask_rejected], dim=0)
+
         loss_mask = loss_mask.to(args.device)
 
         lr = get_lr(
@@ -95,12 +135,19 @@ def train_epoch(epoch):
 
         # ctx 分两种情况，一种基于cpu,一种基于gpu，主要是为了混合精度训练
         with ctx:
-            res = model(X)  # 正向传播得到预测结果
-            loss = loss_fct(res.logits.view(-1, res.logits.size(-1)), Y.view(-1)).view(
-                Y.size()
-            )
+            with torch.no_grad():  # 这个with中的代码涉及到model不会被训练
+                ref_outputs = ref_model(x)
+                ref_logits = ref_outputs.logits
+            ref_probs = logits_to_probs(ref_logits, y)
+            ref_probs = ref_probs * mask
+
+            outputs = model(x)  # 正向传播得到预测结果
+            logits = outputs.logits
+            probs = logits_to_probs(logits, y)
+            probs = ref_probs * mask
+
+            loss = dpo_loss(ref_probs, probs, mask, beta=0.1)
             loss = (loss * loss_mask).sum() / loss_mask.sum()
-            loss += res.aux_loss  # 关于MOE
             loss = loss / args.accumulation_steps  # 梯度的累计，一种优化手段
 
         # 回头要使用混合精度训练(FP32,FP16)；容易出现梯度消失
@@ -137,7 +184,7 @@ def train_epoch(epoch):
             model.eval()
             moe_path = "_moe" if lm_config.use_moe else ""
             # 拼接一个保存模型的路径
-            ckp = f"{args.save_dir}/full_sft_{lm_config.hidden_size}{moe_path}.pth"
+            ckp = f"{args.save_dir}dpo_{lm_config.hidden_size}{moe_path}.pth"
 
             if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                 state_dict = model.moduile.state_dict()
