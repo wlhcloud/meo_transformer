@@ -127,7 +127,7 @@ def train_epoch(epoch):
                 )
             )
 
-        if (step + 1) % args.save_interval == 0 and (not ddp or dist.gat_rank() == 0):
+        if (step + 1) % args.save_interval == 0 and (not ddp or dist.get_rank() == 0):
             model.eval()
             lora_save_path = (
                 f"{args.save_dir}/lora/{args.lora_name}_{lm_config.hidden_size}.pth"
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MyModel SFT With LoRA Training")
     parser.add_argument("--out_dir", type=str, default="./out")
     parser.add_argument(
-        "--epochs", type=int, default=1
+        "--epochs", type=int, default=10
     )  # 如果要效果好，可以训练2-6个轮次
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=5e-4)
@@ -164,7 +164,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_hidden_layers", type=int, default=8)
     parser.add_argument("--max_seq_len", default=512, type=int)
     parser.add_argument("--use_moe", default=False, type=bool)
-    parser.add_argument("--data_path", default="./data/sft_mini_512.jsonl", type=str)
+    parser.add_argument("--data_path", default="./data/lora_medical.jsonl", type=str)
     parser.add_argument(
         "--lora_name", type=str, default="lora_sft_model"
     )  # LoRA模型名称

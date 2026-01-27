@@ -123,7 +123,7 @@ class PretrainDataset(Dataset):
             truncation=True,
             return_tensors="pt",
         )
-        input_ids = encoding.input_ids.squesze()
+        input_ids = encoding.input_ids.squeeze()
         # loss_mask 就是在计算的loss的时候那些时刻对应的输出是我们不关心的，是需要被mask掉
         loss_mask = input_ids != self.tokenizer.pad_token_id
 
