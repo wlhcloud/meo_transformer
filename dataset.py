@@ -3,6 +3,46 @@ import json
 import torch
 
 
+# 重写DataCollator，避免调用tokenizer.pad()
+class CustomDataCollator:
+    def __init__(self, tokenizer, max_length=1000):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __call__(self, features):
+        # 提取所有样本的key值
+        input_ids = [f["input_ids"] for f in features]
+        attention_masks = [f["attention_mask"] for f in features]
+        labels = [f["labels"] for f in features]
+
+        # 手动填充到批次最大长度
+        batch_max_len = min(max(len(ids) for ids in input_ids), self.max_length)
+
+        # 初始化批量数据
+        batch_input_ids = []
+        batch_attention_mask = []
+        batch_labels = []
+
+        for ids, mask, lbl in zip(input_ids, attention_masks, labels):
+            # 填充input_ids
+            padded_ids = ids + [self.tokenizer.pad_token_id] * (batch_max_len - len(ids))
+            # 填充attention_mask
+            padded_mask = mask + [0] * (batch_max_len - len(mask))
+            # 填充labels（-100保持不变）
+            padded_lbl = lbl + [-100] * (batch_max_len - len(lbl))
+
+            batch_input_ids.append(padded_ids)
+            batch_attention_mask.append(padded_mask)
+            batch_labels.append(padded_lbl)
+
+        # 转换为tensor
+        batch = {
+            "input_ids": torch.tensor(batch_input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(batch_attention_mask, dtype=torch.long),
+            "labels": torch.tensor(batch_labels, dtype=torch.long)
+        }
+        return batch
+
 class SFTDataset(Dataset):
     def __init__(self, data_path, tokenizer, max_length=1024):
         super().__init__()
@@ -21,6 +61,7 @@ class SFTDataset(Dataset):
                 # 假设每行是json结构的数据
                 data = json.loads(line.strip())
                 samples.append(data)
+        return samples
 
     def __len__(self):
         return len(self.samples)
@@ -59,9 +100,7 @@ class SFTDataset(Dataset):
                         break
                     end += 1
                 # 把我们关心需要计算loss的时刻设置为1
-                for i in range(
-                    start + 1, min(end + len(self.eos_id) + 1, self.max_length)
-                ):
+                for j in range(start + 1, min(end + len(self.eos_id) + 1, self.max_length)):
                     loss_mask[j] = 1
                 i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids)
             else:
@@ -71,7 +110,7 @@ class SFTDataset(Dataset):
     def __getitem__(self, index):
         sample = self.samples[index]
         # 构建对话提示prompt
-        prompt = self._create_chat_prompt(sample["conversations"])
+        prompt = self._create_chat_prompt(sample["messages"])
         # 分词和截断
         input_ids = self.tokenizer(prompt).input_ids[: self.max_length]
         # 填充
