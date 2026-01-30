@@ -1,7 +1,7 @@
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
-from load_env import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, LOCAL_BASE_URL
+from utils.load_env import LOCAL_BASE_URL
 
 # llm = ChatOpenAI(  # 调用官方的deepseek 的大模型(R1)
 #     model='deepseek-rea TRsoner',

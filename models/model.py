@@ -444,9 +444,16 @@ class MyModel(nn.Module):
                 past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
                 use_cache: bool = False,
                 **kwargs):
+        if input_ids is None:
+            raise ValueError("input_ids 不能为 None")
         batch_size, seq_len = input_ids.shape
-        past_key_values = past_key_values or [None] * len(self.layers)
-        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
+
+        start_pos = 0
+        if past_key_values is not None and past_key_values[0] is not None:
+            key_cache = past_key_values[0][0]
+            if key_cache is not None:
+                start_pos = key_cache.shape[2]
+
 
         hidden_states = self.dropout(self.embed_tokens(input_ids))
 
@@ -491,7 +498,9 @@ class MyModelForCausalLM(PreTrainedModel, GenerationMixin):
         # 这里是输出层
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
         # 下面这行其实属于优化了，参数的共享，减少了被训练的参数量
-        self.model.embed_tokens.weight = self.lm_head.weight
+        self.model.embed_tokens = nn.Linear(
+            self.config.hidden_size, self.config.vocab_size, bias=False
+        )
         self.OUT = CausalLMOutputWithPast()
 
     def forward(self,

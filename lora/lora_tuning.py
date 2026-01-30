@@ -10,7 +10,8 @@ from transformers import (
 from peft import LoraConfig, TaskType, get_peft_model
 
 from dataset import CustomDataCollator
-from my_llm import lora_data_path, original_model_path
+from utils.my_llm import lora_data_path, original_model_path, peft_model_id
+
 # 加载并清洗数据
 df = pd.read_json(lora_data_path)
 df = df.dropna(subset=["instruction", "output"])
@@ -118,7 +119,7 @@ model.print_trainable_parameters()
 
 
 args = TrainingArguments(
-    output_dir="./output/qwen_lora",
+    output_dir="../output/qwen_lora",
     per_device_train_batch_size=4,
     gradient_accumulation_steps=2,
     logging_steps=10,
@@ -147,7 +148,6 @@ trainer = Trainer(
 trainer.train()
 
 # 保存权重
-peft_model_id = "./out/lora/wenbo_think_0.6b"
 model.save_pretrained(peft_model_id, safe_serialization=True)
 tokenizer.save_pretrained(peft_model_id)
 

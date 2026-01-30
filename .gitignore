@@ -7,8 +7,9 @@ logs/
 *.log
 .idea/
 .vscode/
-*.swp
+*.swpd
 *.zip
 *.tar.gz
 data/
 out/
+output/

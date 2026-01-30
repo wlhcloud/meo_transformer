@@ -1,5 +1,4 @@
 import os
-import sys
 
 import torch
 import warnings
@@ -9,7 +8,8 @@ from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
 )
-from model import MyModelConfig, MyModelForCausalLLM
+from models.model import MyModelConfig, MyModelForCausalLM
+from utils.my_llm import project_base_path
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -25,9 +25,9 @@ def convert_torch2transformers_mymodel(
     :param dtype: 模型精度
     """
     MyModelConfig.register_for_auto_class()
-    MyModelForCausalLLM.register_for_auto_class("AutoModelForCausalLM")
+    MyModelForCausalLM.register_for_auto_class("AutoModelForCausalLM")
 
-    lm_model = MyModelForCausalLLM(lm_config)
+    lm_model = MyModelForCausalLM(lm_config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     state_dict = torch.load(torch_path, map_location=device)
     lm_model.load_state_dict(state_dict=state_dict, strict=False)  # 把参数放到神经网络
@@ -38,7 +38,7 @@ def convert_torch2transformers_mymodel(
 
     # safe_serialization False=.b True=safetensors
     lm_model.save_pretrained(transformers_path, safe_serialization=True)
-    tokenizer = AutoTokenizer.from_pretrained("./model/")
+    tokenizer = AutoTokenizer.from_pretrained(os.path.join(project_base_path,"datasets"))
     tokenizer.save_pretrained(transformers_path)
     print(f"模型已保存为 Transformers-MyModel 格式：{transformers_path}")
 
@@ -67,7 +67,7 @@ def convert_torch2transformers_llama(
     llama_model.save_pretrained(transformers_path, safe_serialization=True)
 
     llama_model.save_pretrained(transformers_path, safe_serialization=True)
-    tokenizer = AutoTokenizer.from_pretrained("./model/")
+    tokenizer = AutoTokenizer.from_pretrained(os.path.join(project_base_path,"datasets"))
     tokenizer.save_pretrained(transformers_path)
     print(f"模型已保存为 Transformers-MyModel 格式：{transformers_path}")
 
@@ -76,8 +76,8 @@ if __name__ == "__main__":
     lm_config = MyModelConfig(
         hidden_size=512, num_hidden_layers=8, max_seq_len=512, use_moe=False
     )
-    torch_path = "./out_back/pretrain_512_moe.pth"
-    transformers_path = "./MyModel"
+    torch_path = os.path.join(project_base_path,"out/pretrain_512.pth")
+    transformers_path = os.path.join(project_base_path,"out/transformers/pretrain_512")
 
-    # convert_torch2transformers_mymodel(torch_path, transformers_path)
-    convert_torch2transformers_llama(torch_path, transformers_path)
+    convert_torch2transformers_mymodel(torch_path, transformers_path)
+    # convert_torch2transformers_llama(torch_path, transformers_path)

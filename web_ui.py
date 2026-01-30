@@ -1,6 +1,6 @@
 import os
 
-from my_llm import original_model_path, peft_model_path
+from utils.my_llm import original_model_path, peft_model_path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 import gradio as gr

@@ -39,7 +39,7 @@ def get_lr(current_step, total_steps, lr):
 
 def init_model(lm_config):
     # 下面这行的意思是读取一个现成的分词器模型
-    tokenizer = AutoTokenizer.from_pretrained('./model/')
+    tokenizer = AutoTokenizer.from_pretrained('../model/')
     # 下面这行的意思不是去读取一个现成的大语言模型，而是用自己封装的类初始化一个自己的大语言模型
     model = MyModelForCausalLM(lm_config) # 此时这里的参数是随机初始化的参数
 

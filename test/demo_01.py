@@ -11,7 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI
 
-from load_env import LOCAL_BASE_URL
+from utils.load_env import LOCAL_BASE_URL
 
 llm = ChatOpenAI(  # 调用私有化部署的大模型 (全模态的大模型)
     model="qwen-omni-3b",

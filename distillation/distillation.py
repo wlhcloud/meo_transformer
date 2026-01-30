@@ -6,9 +6,9 @@ import math
 import warnings
 
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
 from torch import optim, nn
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from contextlib import nullcontext
@@ -36,52 +36,51 @@ def get_lr(current_step, total_step, lr):
     return lr / 10 + 0.5 * lr * (1 + math.cos(math.pi * current_step / total_step))
 
 
-def logits_to_probs(logits, labels):
-    # 从大模型给出的对数几率，变成概率分布
-    # logits shape: (batch_size,seq_len,vocab_size)
-    # labels shape:(batch_size,seq_len)
-    # probs shape: (batch_size,seq_len)
-    log_probs = F.log_softmax()  # 先进行softmax,然后再取对数log
-    # gather取值
-    probs = torch.gather(log_probs, dim=2, index=labels.unsqueeze(2)).squeeze(-1)
-    return probs
+def distillation_loss_fn(
+    student_logits, teacher_logits, temperature=1.0, reduction="batchmean"
+):
+    with torch.no_grad():
+        teacher_probs = F.softmax(teacher_logits / temperature, dim=-1).detach()
+
+    student_log_probs = F.log_softmax(student_logits / temperature, dim=-1).detach()
+
+    kl = F.kl_div(student_log_probs, teacher_probs, reduction=reduction)
+
+    return (temperature**2) * kl
 
 
-def dpo_loss(ref_probs, probs, mask, beta):
-    # ref_probs: refrenshce model 进行推理预测之后的结果
-    # probs: 要通过dpo去进行训练的模型推理预测之后的结果
-    # mask: 指的是 Question+Answer 需要计算loss被考虑的时刻，说白了就只和Anwser有关
-    # beta: 就是dpo 损失函数公式中的超参数
-    # ref_probs 和 probs 都是同样的形状
-    seq_lengths = mask.sum(dim=1, keepdim=True)  # (batch_size,1)
-    ref_probs = (ref_probs * mask).sum(dim=1) / seq_lengths.squeeze()
-    probs = (probs * mask).sum(dim=1) / seq_lengths.squeeze()
-
-    # 将chosen数据和rejected数据分开
-    batch_size = ref_probs.shape[0]
-    chosen_ref_probs = ref_probs[: batch_size // 2]
-    rejected_ref_probs = ref_probs[batch_size // 2 :]
-    chosen_probs = probs[: batch_size // 2]
-    rejected_probs = probs[batch_size // 2 :]
-
-    # DPO论文中的损失函数公式计算
-    pi_logratios = chosen_probs - rejected_probs
-    ref_logratios = chosen_ref_probs - rejected_ref_probs
-    logits = pi_logratios - ref_logratios
-    loss = -F.logsigmoid(beta * logits)
-    return loss.mean()
-
-
-def init_model(lm_config):
-    # 读取现成的分词器模型
-    tokenizer = AutoTokenizer.from_pretrained("./model/")
-    # 使用自己封装的类初始化一个自己的大语言模型
-    model = MyModelForCausalLLM(config=lm_config)  # 此时是随机初始化的参数
+def init_student_model(lm_config):
+    tokenizer = AutoTokenizer.from_pretrained("../model/")
+    model = MyModelForCausalLLM(config=lm_config)
     moe_path = "_moe" if lm_config.use_moe else ""
     ckp = f"{args.save_dir}/full_sft_{lm_config.hidden_size}{moe_path}.pth"
     state_dict = torch.load(ckp, map_location=args.device)
     model.load_state_dict(state_dict=state_dict, strict=False)
+    Logger(
+        f"学生模型（LLM）参数量是：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万"
+    )
     model = model.to(args.device)
+    return model, tokenizer
+
+
+def init_teacher_model(lm_config):
+    model = MyModelForCausalLLM(config=lm_config)
+    moe_path = "_moe" if lm_config.use_moe else ""
+    ckp = f"{args.save_dir}/full_sft_{lm_config.hidden_size}{moe_path}.pth"
+    state_dict = torch.load(ckp, map_location=args.device)
+    model.load_state_dict(state_dict=state_dict, strict=False)
+    Logger(
+        f"学生模型（LLM）参数量是：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万"
+    )
+    model = model.to(args.device)
+    return model
+
+
+def init_model(lm_config):
+    # 读取现成的分词器模型
+    tokenizer = AutoTokenizer.from_pretrained("../model/")
+    # 使用自己封装的类初始化一个自己的大语言模型
+    model = MyModelForCausalLLM(config=lm_config).to(args.device)
     Logger(
         f"LLM 可以被训练的参数量是：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万"
     )
@@ -104,23 +103,15 @@ def init_distributed_model():
     torch.cuda.set_device(DEVICE)
 
 
-def train_epoch(epoch):
-
+def train_epoch(epoch, alpha=0.0, temperature=1.0):
     start_time = time.time()
-    for step, batch in enumerate(train_loader):
-        x_chosen = batch["x_chosen"].to(args.device)
-        y_chosen = batch["y_chosen"].to(args.device)
-        mask_chosen = batch["mask_chosen"].to(args.device)
-        x_rejected = batch["x_rejected"].to(args.device)
-        y_rejected = batch["y_rejected"].to(args.device)
-        mask_rejected = batch["mask_rejected"].to(args.device)
+    if teacher_model is not None:
+        teacher_model.eval()
+        teacher_model.requires_grad_(False)
 
-        x = torch.cat(
-            [x_chosen, x_rejected], dim=0
-        )  # 相当于样本的堆叠，只想要一个x数据集
-        y = torch.cat([y_chosen, y_rejected], dim=0)
-        mask = torch.cat([mask_chosen, mask_rejected], dim=0)
-
+    for step, (X, Y, loss_mask) in enumerate(train_loader):
+        X = X.to(args.device)
+        Y = Y.to(args.device)
         loss_mask = loss_mask.to(args.device)
 
         lr = get_lr(
@@ -135,20 +126,42 @@ def train_epoch(epoch):
 
         # ctx 分两种情况，一种基于cpu,一种基于gpu，主要是为了混合精度训练
         with ctx:
-            with torch.no_grad():  # 这个with中的代码涉及到model不会被训练
-                ref_outputs = ref_model(x)
-                ref_logits = ref_outputs.logits
-            ref_probs = logits_to_probs(ref_logits, y)
-            ref_probs = ref_probs * mask
+            res = model(X)  # (学生模型)正向传播得到预测结果
+            student_logits = res.logits
 
-            outputs = model(x)  # 正向传播得到预测结果
-            logits = outputs.logits
-            probs = logits_to_probs(logits, y)
-            probs = ref_probs * mask
+        # 教师模型也要进行前向传播v
+        if teacher_model is not None:
+            with torch.no_grad():
+                teacher_logits = teacher_model(X).logits
+                vocab_size_student = student_logits.size(-1)
+                teacher_logits = teacher_logits[..., :vocab_size_student]
 
-            loss = dpo_loss(ref_probs, probs, mask, beta=0.1)
-            loss = (loss * loss_mask).sum() / loss_mask.sum()
-            loss = loss / args.accumulation_steps  # 梯度的累计，一种优化手段
+        # 计算损失
+        # 1.Ground-Truth Cross Entropy Loss
+        loss_mask_flat = loss_mask.view(-1)
+        ce_loss = F.cross_entropy(
+            student_logits.view(-1, student_logits.size(-1)),
+            Y.view(-1),
+            ignore_inde=0,
+            reduction="onoe",
+        )
+        ce_loss = torch.sum(ce_loss * loss_mask_flat) / loss_mask_flat.sum()
+        if lm_config_student.use_moe:
+            ce_loss += res.aux_loss
+
+        # 2、Distillation loss
+        if teacher_model is not None:
+            # loss_mask表面那些时刻关注的。对于蒸馏损失也是只关注mask是1的那些位置
+            distill_loss = distillation_loss_fn(
+                student_logits.view(-1, student_logits.size(-1))[loss_mask_flat == 1],
+                teacher_logits.view(-1, teacher_logits.size(-1))[loss_mask_flat == 1],
+                temperature=temperature,
+            )
+        else:
+            distill_loss = torch.tensor(0.0, device=args.device)
+
+        # 3、总损失 = alpha *CE + (1-alpha) * Disstill
+        loss = (alpha * ce_loss + (1 - alpha) * distill_loss) / args.accumulation_steps
 
         # 回头要使用混合精度训练(FP32,FP16)；容易出现梯度消失
         scaler.scale(loss).backward()  # 把loss放大
@@ -182,9 +195,9 @@ def train_epoch(epoch):
 
         if (step + 1) % args.save_interval == 0 and (not ddp or dist.gat_rank() == 0):
             model.eval()
-            moe_path = "_moe" if lm_config.use_moe else ""
+            moe_path = "_moe" if lm_config_student.use_moe else ""
             # 拼接一个保存模型的路径
-            ckp = f"{args.save_dir}dpo_{lm_config.hidden_size}{moe_path}.pth"
+            ckp = f"{args.save_dir}/distillation_{lm_config_student.hidden_size}{moe_path}.pth"
 
             if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                 state_dict = model.moduile.state_dict()
@@ -198,7 +211,7 @@ def train_epoch(epoch):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="MyModel Pretraining")
+    parser = argparse.ArgumentParser(description="MyModel Distillation")
     parser.add_argument("--out_dir", type=str, default="./out")
     parser.add_argument(
         "--epochs", type=int, default=1
@@ -223,14 +236,17 @@ if __name__ == "__main__":
     parser.add_argument("--num_hidden_layers", type=int, default=8)
     parser.add_argument("--max_seq_len", default=512, type=int)
     parser.add_argument("--use_moe", default=False, type=bool)
-    parser.add_argument("--data_path", default="./data/sft_mini_512.jsonl", type=str)
+    parser.add_argument("--data_path", default="./data/sft_mmini_512.jsonl", type=str)
 
     args = parser.parse_args()
 
-    lm_config = MyModelConfig(
-        hidden_size=args.hidden_size,
-        num_hidden_layers=args.num_hidden_layers,
-        use_moe=args.use_moe,
+    lm_config_student = MyModelConfig(
+        hidden_size=512,
+        num_hidden_layers=8,
+    )
+    lm_config_teacher = MyModelConfig(
+        hidden_size=768,
+        num_hidden_layers=16,
     )
     args.save_dir = os.path.join(args.out_dir)
     os.makedirs(
@@ -260,7 +276,8 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(base_seed + rank)
 
     # 初始化模型和分词器
-    model, tokenizer = init_model(lm_config)
+    model, tokenizer = init_student_model(lm_config_student)
+    teacher_model = init_teacher_model(lm_config_teacher)
 
     train_ds = SFTDataset(
         args.data_path, tokenizer=tokenizer, max_length=args.max_seq_len
@@ -288,4 +305,4 @@ if __name__ == "__main__":
     iter_per_epoch = len(train_loader)
 
     for epoch in range(args.epochs):
-        train_epoch(epoch)
+        train_epoch(epoch, alpha=0.5, temperature=3)

@@ -1,14 +1,15 @@
 import transformers
 import torch
 
-model_path = r"/home/gybwg/ai-project/models/Qwen/Qwen3-0.6B"
-
+# model_path = r"/home/gybwg/ai-project/models/Qwen/Qwen3-0.6B"
+model_path = '/home/gybwg/ai-project/projects/model-fine-tuning/out/transformers/pretrain_512'
 
 pipeline = transformers.pipeline(
     "text-generation",
     model=model_path,
     model_kwargs={"torch_dtype": torch.bfloat16},
     device="cuda",
+    trust_remote_code=True
 )
 
 messages = [

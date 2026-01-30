@@ -1,5 +1,4 @@
 import os
-import sys
 import argparse
 import time
 import math
@@ -13,9 +12,9 @@ from torch.utils.data import DataLoader, DistributedSampler
 from contextlib import nullcontext
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from model import MyModelForCausalLM, MyModelConfig
+from model.model import MyModelConfig
 from dataset import SFTDataset
-from model_lora import apply_lora_to_model, save_lora_weights
+from model.model_lora import apply_lora_to_model, save_lora_weights
 
 warnings.filterwarnings("ignore")
 
